@@ -1,0 +1,143 @@
+CREATOR QUALIFIER - PROJECT NOTES AND LESSONS LEARNED
+=====================================================
+
+1. THE PROBLEM
+--------------
+To promote RingOut (my online multiplayer PvP arena shooter, built solo, demo on Steam) I ran
+an outreach campaign: ~1,000 YouTube / Twitch creators researched, ~900 personalised emails
+sent. Deciding which creators are a good fit was the slow, manual part.
+
+Question: can an LLM qualify creators the way I do, reliably, cheaply, and without sending
+creators' personal data to a third party?
+
+
+2. WHAT I BUILT
+---------------
+outreach sheet -> ingest -> SQLite <- fetch (YouTube Data API v3, Twitch Helix)
+                               |
+                               +-> classify (Mistral 7B, local, structured JSON output)
+                               |
+              reference labels +-> evaluate (agreement, ranking, contact decision, latency)
+
+- Ingest: 984 creators imported from the outreach spreadsheet (broken links and Bilibili,
+  which has no public API, excluded).
+- Fetch: channel title, description, language, audience, current game, last 10 video/stream
+  titles; later also last upload date and average recent views. 984 fetched, 0 failures.
+- Classify: Mistral 7B running locally through Ollama on an RTX 4060 (8 GB).
+  Output constrained to a JSON schema (score 1-5, games, indie/shooter flags, language,
+  reason), validated with Pydantic. Prompts are versioned (v1, v2, v3) and never edited
+  once used, so results stay comparable.
+- Every LLM call is stored with model, prompt version, tokens and latency.
+- Evaluate: model scores vs reference labels on 100 creators.
+
+
+3. KEY DECISIONS AND TRADE-OFFS
+-------------------------------
+Local model instead of a cloud API
+  - The data contains creators' contact details: with a local model nothing leaves the machine.
+  - Zero marginal cost (the Mistral API now requires a monthly plan).
+  - Trade-off: smaller model (7B), ~4 s per creator, ~1 h for the full list in the background.
+
+Structured output
+  - The JSON schema is enforced at generation time (constrained decoding) and validated.
+  - Result: 100/100 parseable answers on every run; the only failure was one timeout.
+
+Reference labels
+  - 100 creators, stratified sample (all creators who replied + spread across platforms and
+    outreach priorities).
+  - First pass by an LLM (Claude) with a one-line justification per channel; I reviewed all
+    100 and corrected 13 (mostly inactive channels, plus channels too far from shooters).
+
+What the score means
+  - The fit score = content fit + activity. Channel SIZE is kept out of the score and handled
+    as a separate filter (subscribers / viewers are in the data).
+  - Why: my outreach data showed that small channels reply more (a 78-subscriber channel
+    replied, big 100k+ channels almost never did). Mixing size into the score made it
+    inconsistent for both me and the model.
+
+
+4. ITERATIONS AND RESULTS (Mistral 7B, 100 labelled creators)
+-------------------------------------------------------------
+                      v1      v2      v3
+within 1 point        88%     81%     90%
+mean abs. error       0.85    0.97    0.72
+rank corr (Spearman)  0.32    0.44    0.51
+recall   (score>=4)   38%     88%     44%
+precision (score>=4)  26%     24%     25%
+failures              0       0       0 (after the runaway-answer fix)
+latency / creator     4.0 s   3.1 s   3.7 s
+
+v1 - baseline
+  Reasonable overall (88% within one point) but bad on the decision that matters.
+  Three failure modes found by reading the errors:
+  - too cautious: never gives 5, defaults to 2;
+  - blind to dead channels (e.g. a channel with no upload for 3+ years scored 4);
+  - too literal: "no content related to RingOut" (of course: nobody covers it yet).
+
+Label review -> missing data
+  Reviewing the labels showed that inactivity drove many of my own scores, and the model
+  could not see it. I added last upload date and average recent views to the fetch.
+
+v2 - give the model the activity data and a 90-day rule in the prompt
+  - Recall jumped to 88%, ranking improved (0.44).
+  - But the 7B model ignored the 90-day rule even with the date in front of it
+    (a channel inactive for 1,255 days still got 4), and it swung to over-scoring.
+
+v3 - rule in code, calibration examples in the prompt
+  - The inactivity rule is applied in code before any LLM call (YouTube only: Twitch keeps old
+    highlights, so its dates are unreliable).
+  - The prompt gets 5 calibration examples, invented on purpose so that no evaluation creator
+    leaks into the prompt; and it is told to look for SIMILAR games, not RingOut itself.
+  - Best version: 90% within one point, error 0.72, ranking 0.51.
+
+Incident - a runaway answer
+  One creator (ENFANT TERRIBLE) timed out twice. Its video titles are themselves long lists of
+  games ("TOP 40 MOST INSANE RPG...", "40 BIGGEST NEW Game Reveals..."). When the model
+  reached the `games_mentioned` field it never closed the list. Why "add one more game" kept
+  being the most likely next step:
+  - The model continues the context it sees: the input was full of game lists, and nothing
+    in the prompt or schema said how many games to list.
+  - Repetition reinforces itself: the more "game, game, game," it writes, the more likely the
+    pattern continues; once the real names ran out it started repeating them (a known
+    failure of small models).
+  - Temperature 0 always takes the single most likely token: as long as "," stays slightly
+    ahead of "]", the list is never closed.
+  - The JSON schema only allowed "," or "]" at that point, so the model could not escape by
+    writing anything else.
+  - Ollama does not cap output length by default, so it generated until the 3-minute timeout.
+  Fix: bound the output from the outside - `maxItems: 8` on the list in the schema and a
+  400-token cap per answer. Never rely on the model to stop by itself.
+
+Remaining errors
+  - 17 of the 21 "false contacts" are creators I scored 3 and the model scored 4: borderline
+    cases where a human hesitates too. Only 4 / 100 are clear errors (me 1-2, model 4).
+  - Precision at score >= 4 looks low partly because only 16 / 100 creators reach 4 in my
+    labels: a few borderline disagreements move it a lot.
+
+
+5. LESSONS
+----------
+- Do not ask the LLM to do what code does reliably. Deterministic rules (dates, thresholds)
+  belong in code; the LLM judges what code cannot (does this content resemble my game?).
+- Evaluation drives everything. Without labels and metrics, v2 would have looked better
+  (recall 88%) while being worse on accuracy and ignoring its main instruction.
+- Read the errors, not just the metrics. Every improvement came from looking at concrete
+  wrong answers.
+- Data quality first: the biggest gain came from adding a missing field (activity), not from
+  prompt wording. Twitch titles are poor ("HELLO AGAIN :D"), which limits any model.
+- Define the target precisely. Mixing size and fit in one score made labels inconsistent.
+- Version prompts and log every call: comparing v1/v2/v3 side by side was only possible
+  because nothing was overwritten.
+- Constrained JSON output makes a small local model production-usable (0 parse failures),
+  but every list and every answer must be bounded (max items, max tokens): a prompt
+  instruction is only a suggestion to a 7B model, a limit in code is a guarantee.
+
+
+6. LIMITS AND NEXT STEPS
+------------------------
+- 100 labels from one person: small sample, one point of view.
+- Twitch data is thin; next step: recent categories played and stream frequency.
+- Compare a second local model (e.g. Llama 3.1 8B, Qwen 2.5 7B) or a cloud model on the same
+  evaluation set: quality vs cost vs latency.
+- Run v3 on all 984 creators and use the ranked list (fit score + size filter) for the next
+  outreach wave; measure whether the reply rate improves.
