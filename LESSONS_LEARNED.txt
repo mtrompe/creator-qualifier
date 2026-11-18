@@ -115,6 +115,31 @@ Remaining errors
     labels: a few borderline disagreements move it a lot.
 
 
+4b. FULL RUN (v3, all 984 creators)
+-----------------------------------
+Result
+  - 984 / 984 creators scored. Score distribution: 1 = 38, 2 = 203, 3 = 542, 4 = 201, 5 = 0.
+  - The 884 creators not already scored ran in 49 minutes, 3.3 s each on average, on my
+    RTX 4060 (8 GB). About 1.0 M input + 0.16 M output tokens over all v3 calls, cost 0.
+  - The code rule (no YouTube upload for 90+ days -> score 1) settled 12 channels with no LLM
+    call. It never fires on Twitch: Twitch often deletes old streams, so there is no reliable
+    date, and an unknown date must not be read as "inactive".
+
+What the full run taught me
+  - Make long jobs resumable. Each call is written to the database as soon as it finishes,
+    and classify skips creators that already have a v3 result. Two timeouts during the test
+    run on one creator cost nothing: the next run simply picked it up.
+  - Timeouts are part of the job. One call took 3 minutes, most took 2-4 seconds. A timeout
+    plus a retry on the next run is cheaper than waiting forever.
+  - Small models compress toward the middle. 55% of creators got a 3 and none got a 5, even
+    though the prompt says "use the whole 1-5 scale" and 4% of my own labels are 5s. The
+    instruction is not enough; the 3-vs-4 boundary carries most of the decision.
+  - A metric on 100 labels tells you how to read 984 scores. With ~25% precision and ~44%
+    recall at score >= 4, the 201 creators at 4 are a shortlist to check by hand, and the
+    scores rank creators rather than exclude anyone. That still cuts manual review from
+    984 profiles to about 200 to look at first.
+
+
 5. LESSONS
 ----------
 - Do not ask the LLM to do what code does reliably. Deterministic rules (dates, thresholds)
@@ -139,5 +164,7 @@ Remaining errors
 - Twitch data is thin; next step: recent categories played and stream frequency.
 - Compare a second local model (e.g. Llama 3.1 8B, Qwen 2.5 7B) or a cloud model on the same
   evaluation set: quality vs cost vs latency.
-- Run v3 on all 984 creators and use the ranked list (fit score + size filter) for the next
-  outreach wave; measure whether the reply rate improves.
+- Use the v3 ranking (fit score + size filter) for the next outreach wave and measure
+  whether the reply rate improves.
+- Fix the compressed scale: ask for a ranking-friendly output (e.g. probability of a 4-5)
+  or add more 5-level calibration examples, then re-evaluate on the 100 labels.

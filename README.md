@@ -28,6 +28,7 @@ outreach sheet --> ingest --> SQLite <-- fetch (YouTube Data API v3, Twitch Heli
 | 3. LLM classification with versioned prompts, run locally (Ollama + Mistral 7B) | `qualifier.classify` | done |
 | 4. Evaluation: model vs. human, latency and tokens per model | `qualifier.evaluate` | done |
 | 5. Iteration: label review showed inactivity drove many of my scores; added last-upload date and average views, prompt v2 | `fetch --refresh`, `--prompt v2` | done |
+| 6. Full run: prompt v3 on all 984 creators | `classify --prompt v3` | done |
 
 All data lives in `data/qualifier.db` (SQLite). Every LLM call is stored with its model,
 prompt version, tokens and latency, so any result can be traced and compared.
@@ -49,6 +50,21 @@ prompt version, tokens and latency, so any result can be traced and compared.
   the rule and swung to over-scoring.
 - **v3**: inactivity rule moved into code, calibration examples in the prompt. Best version.
   Most remaining "false contacts" are 3-vs-4 borderline cases.
+
+## Full run (v3, all 984 creators)
+
+| Fit score | 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|---|
+| Creators | 38 (4%) | 203 (21%) | 542 (55%) | 201 (20%) | 0 |
+
+- 984 / 984 creators scored, 0 final failures. The 884 not already scored ran in 49 minutes
+  (3.3 s per creator on an RTX 4060 8 GB). All v3 calls together: about 1.2 M tokens, zero API cost.
+- The inactivity rule settled 12 YouTube channels without calling the model (Twitch has no
+  reliable last-stream date, so the rule never applies there).
+- The model never gives a 5, although 4% of my labels are 5s: it compresses toward the middle.
+- 201 creators score 4. With the precision measured on the labelled set (~25%), that is a
+  shortlist to review by hand rather than a list to contact blindly; and with ~44% recall,
+  the scores are used to prioritise, not to drop anyone.
 
 Key lesson: deterministic rules belong in code, the LLM judges what code cannot. Details,
 incidents and trade-offs in [LESSONS_LEARNED.txt](LESSONS_LEARNED.txt).
